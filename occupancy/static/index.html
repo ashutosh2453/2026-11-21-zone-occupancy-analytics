@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Zone Occupancy Analytics</title>
+<style>
+  :root { --bg:#f5f5f2; --panel:#fff; --ink:#1b1b19; --muted:#6a6a64; --line:#e0e0da; --accent:#2d55c8; --bad:#b42318; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#131312; --panel:#1c1c1a; --ink:#ececea; --muted:#9b9b95; --line:#32322e; --accent:#8fa9ff; --bad:#ff9d92; } }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font:15px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif; }
+  main { max-width:1100px; margin:0 auto; padding:20px 16px 60px; display:grid; gap:16px; grid-template-columns:1fr; }
+  @media (min-width:900px) { main { grid-template-columns:360px 1fr; } }
+  header { grid-column:1/-1; } h1 { font-size:20px; margin:0; } h2 { font-size:16px; margin:0 0 10px; }
+  header p, .muted { color:var(--muted); }
+  section { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:16px; min-width:0; }
+  label { display:block; font-size:13px; color:var(--muted); margin-top:10px; }
+  input, textarea, button { font:inherit; color:inherit; }
+  textarea { width:100%; min-height:180px; font-family:ui-monospace,monospace; font-size:12px; background:var(--bg); border:1px solid var(--line); border-radius:6px; padding:8px; }
+  button { margin-top:12px; padding:8px 14px; border:0; border-radius:6px; background:var(--accent); color:#fff; cursor:pointer; }
+  button:disabled { opacity:.6; cursor:wait; }
+  table { width:100%; border-collapse:collapse; font-size:14px; } th, td { text-align:left; padding:6px; border-bottom:1px solid var(--line); }
+  img { max-width:100%; border-radius:6px; margin-top:8px; }
+  .err { color:var(--bad); } .alert { color:var(--bad); font-weight:600; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Zone Occupancy Analytics</h1>
+    <p>Upload CCTV-style footage: people are detected, tracked, counted across lines and timed inside zones. Heads are pixelated in the output and the uploaded video is deleted after processing.</p>
+  </header>
+  <section>
+    <h2>Analyse a video</h2>
+    <label>Video (mp4, avi, mov; up to 100 MB)<input type="file" id="video" accept="video/*"></label>
+    <label>Scene (zones and counting lines, in pixels)<textarea id="scene">{
+  "zones": [{"name": "checkout", "polygon": [[400,200],[630,200],[630,355],[400,355]], "max_occupancy": 1}],
+  "lines": [{"name": "entrance", "a": [320,10], "b": [320,350]}]
+}</textarea></label>
+    <label><input type="checkbox" id="privacy" checked> Pixelate heads in the annotated video</label>
+    <label>Run the detector every <input type="number" id="every" min="1" max="10" value="1" style="width:4em"> frame(s); the tracker fills the gaps</label>
+    <button id="go">Analyse</button>
+    <p id="status" class="muted"></p>
+  </section>
+  <section id="out"><p class="muted">Results appear here. Tip: <code>occupancy demo out/</code> generates sample footage with known ground truth.</p></section>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+$("go").onclick = async () => {
+  const file = $("video").files[0];
+  if (!file) { $("status").textContent = "Choose a video first."; return; }
+  try { JSON.parse($("scene").value); } catch (e) { $("status").innerHTML = `<span class="err">Scene is not valid JSON: ${esc(e.message)}</span>`; return; }
+  const fd = new FormData();
+  fd.append("video", file); fd.append("scene", $("scene").value);
+  fd.append("privacy", $("privacy").checked); fd.append("detect_every", $("every").value);
+  $("go").disabled = true; $("status").textContent = "Processing… (CPU inference takes a while)";
+  try {
+    const res = await fetch("/analyze", { method: "POST", body: fd });
+    const r = await res.json();
+    if (!res.ok) throw new Error(typeof r.detail === "string" ? r.detail : JSON.stringify(r.detail));
+    $("status").textContent = `Done: ${r.video.frames_processed} frames at ${r.video.processing_fps} fps.`;
+    $("out").innerHTML = `
+      <h2>Summary</h2>
+      <p>${r.unique_people} unique people over ${r.duration_s} s.</p>
+      <table><tr><th>Line</th><th>In</th><th>Out</th></tr>
+      ${Object.entries(r.lines).map(([k, v]) => `<tr><td>${esc(k)}</td><td>${v.in}</td><td>${v.out}</td></tr>`).join("") || "<tr><td colspan=3 class=muted>no lines</td></tr>"}</table>
+      <table style="margin-top:12px"><tr><th>Zone</th><th>Peak</th><th>Avg</th><th>Visitors</th><th>Avg dwell (s)</th><th>Over capacity (s)</th></tr>
+      ${Object.entries(r.zones).map(([k, z]) => `<tr><td>${esc(k)}</td><td>${z.peak_occupancy}</td><td>${z.average_occupancy}</td><td>${z.visitors}</td><td>${z.average_dwell_s}</td><td>${z.seconds_over_capacity}</td></tr>`).join("") || "<tr><td colspan=6 class=muted>no zones</td></tr>"}</table>
+      ${r.alerts.length ? `<h2 style="margin-top:14px">Alerts</h2>${r.alerts.map(a => `<p class="alert">${esc(a.zone)} over capacity at ${a.time_s}s (${a.occupancy}/${a.limit})</p>`).join("")}` : ""}
+      <h2 style="margin-top:14px">Foot-traffic heatmap</h2><img src="${esc(r.links.heatmap)}" alt="Heatmap of where people stood">
+      <p><a href="${esc(r.links.video)}">Download annotated video</a> · <a href="${esc(r.links.report)}">report.json</a></p>`;
+  } catch (e) { $("status").innerHTML = `<span class="err">${esc(e.message)}</span>`; }
+  $("go").disabled = false;
+};
+</script>
+</body>
+</html>
